@@ -19,6 +19,7 @@
 
   --series-1:        #2a78d6;   /* 气温 */
   --series-2:        #eb6834;   /* 体感温度 */
+  --series-3:        #1baf7a;   /* 降水概率 */
 
   --status-good:     #0ca30c;
   --status-warning:  #fab219;
@@ -42,6 +43,7 @@
     --wash:            rgba(255,255,255,0.05);
     --series-1:        #3987e5;
     --series-2:        #d95926;
+    --series-3:        #199e70;
   }
 }
 :root[data-theme="dark"] {
@@ -57,6 +59,7 @@
   --wash:            rgba(255,255,255,0.05);
   --series-1:        #3987e5;
   --series-2:        #d95926;
+  --series-3:        #199e70;
 }
 
 * { box-sizing: border-box; }
@@ -154,6 +157,7 @@ body {
 .legend .item { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--text-secondary); }
 .legend .key { width: 14px; height: 2px; border-radius: 1px; flex: none; }
 .legend .key.dot { width: 9px; height: 9px; border-radius: 50%; }
+.legend .key.bar { width: 9px; height: 9px; border-radius: 2px; }
 
 /* ---------- 图表容器 ---------- */
 .chart { position: relative; width: 100%; }
@@ -173,6 +177,25 @@ body {
 .tip .r .nm { display: inline-flex; align-items: center; gap: 6px; }
 .tip .r .key { width: 9px; height: 9px; border-radius: 50%; flex: none; }
 .tip .r .vl { color: var(--text-primary); font-weight: 600; font-variant-numeric: tabular-nums; }
+
+/* ---------- 生活指数 ---------- */
+.life-grid {
+  display: grid; gap: 1px; background: var(--border);
+  grid-template-columns: repeat(auto-fit, minmax(156px, 1fr));
+  border: 1px solid var(--border); border-radius: 12px; overflow: hidden;
+}
+.life { background: var(--surface-1); padding: 13px 15px; }
+.life-top { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--text-muted); }
+.life-icon { font-size: 15px; line-height: 1; }
+.life-level {
+  display: flex; align-items: center; gap: 7px;
+  margin-top: 6px; font-size: 16px; font-weight: 600; letter-spacing: -0.01em;
+}
+.life-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.life-advice { font-size: 12.5px; color: var(--text-secondary); margin-top: 3px; }
+
+/* ---------- 定位提示 ---------- */
+.locnote { font-size: 12.5px; color: var(--text-muted); margin: -6px 0 14px; }
 
 /* ---------- 表格视图 ---------- */
 .tablewrap { overflow-x: auto; margin-top: 4px; }
@@ -210,9 +233,12 @@ tbody th { text-align: left; font-weight: 500; color: var(--text-primary); }
       <span class="sub" id="updatedAt">加载中…</span>
     </div>
     <div class="seg" id="districts" role="group" aria-label="选择区域"></div>
+    <button class="iconbtn" id="locateBtn" type="button" title="按当前位置自动选择区域">📍 定位</button>
     <button class="iconbtn" id="refreshBtn" type="button">刷新</button>
     <button class="iconbtn" id="themeBtn" type="button" title="切换主题">🌗 主题</button>
   </div>
+
+  <p class="locnote" id="locNote" hidden></p>
 
   <div id="loading" class="card"><div class="state">正在获取珠海天气数据…</div></div>
   <div id="error" class="card" hidden></div>
@@ -237,12 +263,19 @@ tbody th { text-align: left; font-weight: 500; color: var(--text-primary); }
       </div>
     </section>
 
-    <!-- 24 小时气温 -->
+    <!-- 24 小时气温 + 降水 -->
     <section class="card" aria-labelledby="hourlyTitle">
-      <h2 id="hourlyTitle">未来 24 小时气温</h2>
-      <p class="hint">实况气温与体感温度，逐小时</p>
+      <h2 id="hourlyTitle">未来 24 小时</h2>
+      <p class="hint">上：气温与体感温度 · 下：降水概率</p>
       <div class="legend" id="hourlyLegend"></div>
       <div class="chart" id="hourlyChart"><div class="tip" id="hourlyTip"></div></div>
+    </section>
+
+    <!-- 生活指数 -->
+    <section class="card" aria-labelledby="lifeTitle">
+      <h2 id="lifeTitle">生活指数</h2>
+      <p class="hint">由当前气温、湿度、风速、降水与紫外线推算，仅供参考</p>
+      <div class="life-grid" id="lifeGrid"></div>
     </section>
 
     <!-- 7 天预报 -->
@@ -370,7 +403,8 @@ const state = {
   district: DISTRICTS[0],
   forecast: null,
   air: null,
-  updated: null
+  updated: null,
+  userPicked: false        // 用户手动选过区域后，自动定位不再覆盖
 };
 
 /* ==================== 数据获取 ==================== */
@@ -390,7 +424,7 @@ async function load(d) {
       "temperature_2m","relative_humidity_2m","apparent_temperature","is_day",
       "precipitation","weather_code","wind_speed_10m","wind_direction_10m","surface_pressure"
     ].join(","),
-    hourly: ["temperature_2m","apparent_temperature","precipitation_probability","weather_code"].join(","),
+    hourly: ["temperature_2m","apparent_temperature","precipitation_probability","precipitation","weather_code"].join(","),
     daily: [
       "weather_code","temperature_2m_max","temperature_2m_min",
       "sunrise","sunset","precipitation_sum","precipitation_probability_max",
@@ -483,35 +517,57 @@ function hourlySlice() {
     temp:  h.temperature_2m.slice(i, end),
     feels: h.apparent_temperature.slice(i, end),
     pop:   h.precipitation_probability.slice(i, end),
+    pmm:   h.precipitation.slice(i, end),
     code:  h.weather_code.slice(i, end)
   };
 }
 
 const HOURLY_PAD = { t: 16, r: 54, b: 26, l: 46 };
+const TEMP_H = 176;      // 温度面板高度
+const PANEL_GAP = 38;    // 温度面板与降水面板之间的间隔
+const PRECIP_H = 54;     // 降水柱面板高度
+
+// 顶部圆角、底部为直角的柱形（柱从基线长出，只有数据端倒角）
+function barPath(x, y, w, h, r) {
+  r = Math.max(0, Math.min(r, w / 2, h));
+  return `M${x},${y + h} L${x},${y + r} Q${x},${y} ${x + r},${y} `
+       + `L${x + w - r},${y} Q${x + w},${y} ${x + w},${y + r} L${x + w},${y + h} Z`;
+}
 
 function drawHourly() {
   const host = $("#hourlyChart");
   const tip = $("#hourlyTip");
   const W = host.clientWidth;
   if (!W) return;
-  const H = 236;
   const P = HOURLY_PAD;
   const plotW = W - P.l - P.r;
-  const plotH = H - P.t - P.b;
+  const plotH = TEMP_H;
+  const H = P.t + plotH + PANEL_GAP + PRECIP_H + P.b;
 
   const d = hourlySlice();
-  const s1 = cssVar("--series-1"), s2 = cssVar("--series-2");
+  const s1 = cssVar("--series-1"), s2 = cssVar("--series-2"), s3 = cssVar("--series-3");
   const surf = cssVar("--surface-1"), grid = cssVar("--gridline");
-  const muted = cssVar("--text-muted"), sec = cssVar("--text-secondary");
+  const muted = cssVar("--text-muted"), sec = cssVar("--text-secondary"), base = cssVar("--baseline");
 
+  // ——— 温度面板 ———
   const all = [...d.temp, ...d.feels];
   const rawLo = Math.min(...all), rawHi = Math.max(...all);
   const padT = Math.max(1.5, (rawHi - rawLo) * 0.18);
-  const sc = niceScale(rawLo - padT, rawHi + padT, 3);
+  const sc = niceScale(rawLo - padT, rawHi + padT, 5);
   const lo = sc.lo, hi = sc.hi;
 
   const X = i => P.l + (plotW * i) / (d.time.length - 1);
   const Y = v => P.t + plotH * (1 - (v - lo) / (hi - lo));
+
+  // ——— 降水面板：0~100%，独立量纲，单独刻度，不与温度共用 Y 轴 ———
+  const PT = P.t + plotH + PANEL_GAP;     // 100% 所在高度
+  const PB = PT + PRECIP_H;               // 基线（0%）
+  const PY = p => PT + PRECIP_H * (1 - Math.max(0, Math.min(100, p)) / 100);
+
+  const maxPop = Math.max(...d.pop);
+  const band = plotW / d.time.length;
+  const barW = Math.max(3, Math.min(14, band - 3));
+  const peakPopI = d.pop.indexOf(maxPop);
 
   // — 网格与 Y 轴 —
   let gridSvg = "", yLabels = "";
@@ -562,19 +618,49 @@ function drawHourly() {
                      text-anchor="middle" font-size="11.5" font-weight="600" fill="${sec}"
                      style="font-variant-numeric:tabular-nums">${Math.round(d.temp[peakI])}°</text>`;
 
+  // — 降水面板 —
+  let precipSvg = "";
+  precipSvg += `<line x1="${P.l}" y1="${PB}" x2="${W - P.r}" y2="${PB}"
+                  stroke="${base}" stroke-width="1" shape-rendering="crispEdges"/>`;
+  precipSvg += `<line x1="${P.l}" y1="${(PT + PRECIP_H / 2).toFixed(1)}" x2="${W - P.r}"
+                  y2="${(PT + PRECIP_H / 2).toFixed(1)}"
+                  stroke="${grid}" stroke-width="1" shape-rendering="crispEdges"/>`;
+  precipSvg += `<text x="${P.l - 9}" y="${(PT + 3.5).toFixed(1)}" text-anchor="end"
+                  font-size="11" fill="${muted}" style="font-variant-numeric:tabular-nums">100%</text>`;
+  precipSvg += `<text x="${P.l - 9}" y="${(PB + 3.5).toFixed(1)}" text-anchor="end"
+                  font-size="11" fill="${muted}" style="font-variant-numeric:tabular-nums">0</text>`;
+
+  d.pop.forEach((p, i) => {
+    const h = (PRECIP_H * Math.max(0, Math.min(100, p))) / 100;
+    if (h < 0.8) return;                                  // 0 概率不画柱，避免读成有值
+    const bx = Math.min(Math.max(X(i) - barW / 2, P.l), P.l + plotW - barW);
+    precipSvg += `<path d="${barPath(bx, PB - h, barW, h, 4)}" fill="${s3}"/>`;
+  });
+
+  // 只直接标注最高的那根柱，不给每根加数字
+  if (maxPop >= 20) {
+    precipSvg += `<text x="${X(peakPopI).toFixed(1)}" y="${(PY(maxPop) - 7).toFixed(1)}"
+                    text-anchor="middle" font-size="11.5" font-weight="600" fill="${sec}"
+                    style="font-variant-numeric:tabular-nums">${maxPop}%</text>`;
+  }
+  precipSvg += `<text x="${P.l}" y="${(PT - 11).toFixed(1)}" font-size="11.5"
+                  fill="${muted}">降水概率</text>`;
+
   // — 悬停层 —
-  let hoverSvg = `<g id="hGroup" style="opacity:0">
-      <line id="hLine" y1="${P.t}" y2="${P.t + plotH}" stroke="${cssVar("--baseline")}" stroke-width="1"/>
+  const hoverSvg = `<g id="hGroup" style="opacity:0">
+      <rect id="hBand" y="${PT}" width="${band.toFixed(1)}" height="${PRECIP_H}" fill="${s3}" fill-opacity="0.16"/>
+      <line id="hLine" y1="${P.t}" y2="${PB}" stroke="${base}" stroke-width="1"/>
       <circle id="hDot1" r="4.5" fill="${s1}" stroke="${surf}" stroke-width="2"/>
       <circle id="hDot2" r="4.5" fill="${s2}" stroke="${surf}" stroke-width="2"/>
+      <rect id="hBar" width="${barW}" height="3" fill="${s3}" stroke="${surf}" stroke-width="2"/>
     </g>
-    <rect id="hRect" x="${P.l}" y="${P.t}" width="${plotW}" height="${plotH}" fill="transparent" style="cursor:crosshair"/>`;
+    <rect id="hRect" x="${P.l}" y="${P.t}" width="${plotW}" height="${PB - P.t}" fill="transparent" style="cursor:crosshair"/>`;
 
   host.querySelector("svg")?.remove();
   host.insertAdjacentHTML("afterbegin", `
     <svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img"
-         aria-label="未来24小时气温与体感温度折线图">
-      ${gridSvg}${yLabels}${xLabels}
+         aria-label="未来24小时气温、体感温度折线图与降水概率柱状图">
+      ${gridSvg}${yLabels}${precipSvg}${xLabels}
       <path d="${areaPath}" fill="${s1}" fill-opacity="0.10"/>
       <path d="${line(d.feels)}" fill="none" stroke="${s2}" stroke-width="2"
             stroke-linejoin="round" stroke-linecap="round"/>
@@ -600,14 +686,23 @@ function drawHourly() {
     const x = X(i);
 
     g.style.opacity = 1;
-    g.querySelector("#hLine").setAttribute("x1", x);
-    g.querySelector("#hLine").setAttribute("x2", x);
-    const dot = (id, v, color) => {
+    const hl = g.querySelector("#hLine");
+    hl.setAttribute("x1", x);
+    hl.setAttribute("x2", x);
+    const dot = (id, v) => {
       const c = g.querySelector(id);
       c.setAttribute("cx", x); c.setAttribute("cy", Y(v));
     };
     dot("#hDot1", d.temp[i], s1);
     dot("#hDot2", d.feels[i], s2);
+
+    // 降水面板：色带随指针移动，顶端横条标出该小时的概率高度
+    const pop = d.pop[i] ?? 0;
+    g.querySelector("#hBand").setAttribute("x",
+      Math.min(Math.max(x - band / 2, P.l), P.l + plotW - band));
+    g.querySelector("#hBar").setAttribute("x",
+      Math.min(Math.max(x - barW / 2, P.l), P.l + plotW - barW));
+    g.querySelector("#hBar").setAttribute("y", PY(pop));
 
     const hour = d.time[i].slice(11, 16);
     const dayTag = d.time[i].slice(0, 10) === state.forecast.daily.time[0] ? "今天" : "明天";
@@ -617,7 +712,9 @@ function drawHourly() {
         <span class="vl">${d.temp[i].toFixed(1)}°</span></div>
       <div class="r"><span class="nm"><span class="key" style="background:${s2}"></span>体感</span>
         <span class="vl">${d.feels[i].toFixed(1)}°</span></div>
-      <div class="r"><span class="nm">降水概率</span><span class="vl">${d.pop[i] ?? 0}%</span></div>`;
+      <div class="r"><span class="nm"><span class="key" style="background:${s3}"></span>降水概率</span>
+        <span class="vl">${pop}%</span></div>
+      <div class="r"><span class="nm">降水量</span><span class="vl">${(d.pmm[i] ?? 0).toFixed(1)} mm</span></div>`;
     tip.classList.add("on");
 
     const tw = tip.offsetWidth;
@@ -775,6 +872,7 @@ function renderTable() {
       <td>${hs.feels[i].toFixed(1)} °C</td>
       <td>${cond}</td>
       <td>${hs.pop[i] ?? 0} %</td>
+      <td>${(hs.pmm[i] ?? 0).toFixed(1)} mm</td>
     </tr>`;
   }).join("");
 
@@ -793,7 +891,7 @@ function renderTable() {
       <caption>未来 24 小时（数据表视图）</caption>
       <thead><tr>
         <th scope="col">时间</th><th scope="col">气温</th><th scope="col">体感</th>
-        <th scope="col">天气</th><th scope="col">降水概率</th>
+        <th scope="col">天气</th><th scope="col">降水概率</th><th scope="col">降水量</th>
       </tr></thead>
       <tbody>${hourlyRows}</tbody>
     </table>`;
@@ -802,10 +900,94 @@ function renderTable() {
 /* ==================== 渲染入口 ==================== */
 
 function renderLegend() {
-  const s1 = cssVar("--series-1"), s2 = cssVar("--series-2");
+  const s1 = cssVar("--series-1"), s2 = cssVar("--series-2"), s3 = cssVar("--series-3");
   $("#hourlyLegend").innerHTML = `
     <span class="item"><span class="key" style="background:${s1}"></span>气温</span>
-    <span class="item"><span class="key" style="background:${s2}"></span>体感温度</span>`;
+    <span class="item"><span class="key" style="background:${s2}"></span>体感温度</span>
+    <span class="item"><span class="key bar" style="background:${s3}"></span>降水概率</span>`;
+}
+
+/* ==================== 渲染：生活指数 ==================== */
+
+const LIFE_COLORS = ["", "var(--status-good)", "var(--status-warning)",
+                     "var(--status-serious)", "var(--status-critical)"];
+
+function renderLife() {
+  const f = state.forecast, d = f.daily, c = f.current;
+  const aqi  = state.air ? state.air.current.us_aqi : null;
+  const feels = c.apparent_temperature;
+  const hum   = c.relative_humidity_2m;
+  const wind  = c.wind_speed_10m;
+
+  // 未来 48 小时（今天 + 明天）用于洗车/晾晒
+  const p48  = Math.max(d.precipitation_probability_max[0] ?? 0, d.precipitation_probability_max[1] ?? 0);
+  const mm48 = (d.precipitation_sum[0] ?? 0) + (d.precipitation_sum[1] ?? 0);
+  const swing = Math.abs((d.temperature_2m_max[0] ?? 0) - (d.temperature_2m_max[1] ?? 0));
+
+  const items = [];
+
+  // 穿衣
+  const dress =
+    feels >= 32 ? ["炎热", 3, "短袖短裤，注意防暑补水"]
+  : feels >= 28 ? ["热",   2, "短袖薄衫，户外注意防晒"]
+  : feels >= 24 ? ["舒适", 1, "短袖或薄长袖皆可"]
+  : feels >= 20 ? ["温暖", 1, "长袖衬衫，早晚可加薄外套"]
+  : feels >= 16 ? ["微凉", 2, "薄外套或针织衫"]
+  : feels >= 12 ? ["凉",   2, "外套加毛衣"]
+  : feels >= 8  ? ["冷",   3, "厚外套或薄羽绒"]
+  :               ["寒冷", 3, "棉衣羽绒，注意保暖"];
+  items.push(["👕", "穿衣", ...dress]);
+
+  // 洗车
+  const car =
+    (p48 >= 60 || mm48 >= 5) ? ["不宜",   4, `未来两天有雨（${mm48.toFixed(1)} mm），洗完易脏`]
+  : (p48 >= 40 || mm48 >= 1) ? ["较不宜", 3, "未来两天可能下雨，建议改天"]
+  : p48 >= 20                ? ["较适宜", 2, "可能飘雨，留意天气变化"]
+  :                            ["适宜",   1, "未来两天无雨，适合洗车"];
+  items.push(["🚗", "洗车", ...car]);
+
+  // 晾晒
+  const dry =
+    (p48 >= 50 || mm48 >= 2) ? ["不宜",   4, "未来两天有雨，不适合晾晒"]
+  : hum >= 85                ? ["不太适宜", 3, "空气潮湿，衣物不易干"]
+  : (hum <= 70 && wind >= 15) ? ["非常适宜", 1, "干燥有风，衣物快干"]
+  :                            ["适宜",   1, "天气条件适合晾晒"];
+  items.push(["🧺", "晾晒", ...dry]);
+
+  // 运动
+  const sport =
+    (p48 >= 60 || feels >= 35 || (aqi != null && aqi > 150))
+      ? ["不宜",   4, "高温、降雨或空气差，建议室内运动"]
+  : (p48 >= 30 || feels >= 32 || (aqi != null && aqi > 100))
+      ? ["较不宜", 3, "条件一般，建议降低强度、避开午后"]
+  : wind >= 30
+      ? ["较不宜", 3, "风力较大，户外注意安全"]
+  :   ["适宜",   1, "天气不错，适合户外运动"];
+  items.push(["🏃", "运动", ...sport]);
+
+  // 感冒
+  const cold =
+    (swing >= 5 || d.temperature_2m_min[0] < 10) ? ["易发",   3, `昼夜温差变化大，注意增减衣物`]
+  : (swing >= 3 || hum >= 85)                    ? ["较易发", 2, "温差或湿度偏大，注意防护"]
+  :                                                ["少发",   1, "天气平稳，感冒风险较低"];
+  items.push(["🤧", "感冒", ...cold]);
+
+  // 中暑（按体感温度分档）
+  const heat =
+    feels >= 38 ? ["极易中暑", 4, "避免户外活动，及时补水降温"]
+  : feels >= 35 ? ["易中暑",   3, "减少户外时间，多喝水"]
+  : feels >= 32 ? ["较易中暑", 2, "午后避免暴晒，注意补水"]
+  :               ["不易中暑", 1, "体感舒适，无明显中暑风险"];
+  items.push(["🥵", "中暑", ...heat]);
+
+  $("#lifeGrid").innerHTML = items.map(([icon, name, level, lv, advice]) => `
+    <div class="life">
+      <div class="life-top"><span class="life-icon" aria-hidden="true">${icon}</span>${name}指数</div>
+      <div class="life-level">
+        <span class="life-dot" style="background:${LIFE_COLORS[lv]}"></span>${level}
+      </div>
+      <div class="life-advice">${advice}</div>
+    </div>`).join("");
 }
 
 function renderAll() {
@@ -813,6 +995,7 @@ function renderAll() {
   renderLegend();
   drawHourly();
   drawDaily();
+  renderLife();
   renderTable();
 }
 
@@ -856,6 +1039,80 @@ async function run(isRefresh) {
 
 /* ==================== 区域选择 & 主题 ==================== */
 
+/* ==================== 定位 ==================== */
+
+const ZHUHAI = { lat: 22.2707, lon: 113.5767, radiusKm: 60 };
+
+function haversineKm(a, b) {
+  const R = 6371, rad = x => (x * Math.PI) / 180;
+  const dLat = rad(b.lat - a.lat), dLon = rad(b.lon - a.lon);
+  const s = Math.sin(dLat / 2) ** 2 +
+            Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(s));
+}
+
+function locNote(msg, isWarn) {
+  const el = $("#locNote");
+  if (!msg) { el.hidden = true; return; }
+  el.hidden = false;
+  el.textContent = msg;
+  el.style.color = isWarn ? "var(--status-warning)" : "";
+}
+
+/** 返回最近的区；不在珠海范围内则返回 null。 */
+function nearestDistrict(lat, lon) {
+  let best = null, bestKm = Infinity;
+  for (const d of DISTRICTS) {
+    const km = haversineKm({ lat, lon }, d);
+    if (km < bestKm) { bestKm = km; best = d; }
+  }
+  return bestKm <= ZHUHAI.radiusKm ? { district: best, km: bestKm } : null;
+}
+
+function useDistrict(d) {
+  state.district = d;
+  $("#districts").querySelectorAll("button").forEach(b =>
+    b.setAttribute("aria-pressed", String(b.dataset.id === d.id)));
+  run(false);
+}
+
+function locate() {
+  const btn = $("#locateBtn");
+  if (!navigator.geolocation) {
+    locNote("当前浏览器不支持定位，请手动选择区域。", true);
+    return;
+  }
+  btn.disabled = true;
+  locNote("正在获取位置…");
+
+  navigator.geolocation.getCurrentPosition(
+    pos => {
+      btn.disabled = false;
+      const { latitude: lat, longitude: lon } = pos.coords;
+      const hit = nearestDistrict(lat, lon);
+      if (!hit) {
+        locNote(`当前位置（${lat.toFixed(2)}°N, ${lon.toFixed(2)}°E）不在珠海范围内，`
+              + `已保持${state.district.name}。`, true);
+        return;
+      }
+      if (hit.district.id === state.district.id) {
+        locNote(`已按当前位置定位到${hit.district.name}（距约 ${hit.km.toFixed(0)} 公里）。`);
+        return;
+      }
+      locNote(`已按当前位置定位到${hit.district.name}（距约 ${hit.km.toFixed(0)} 公里）。`);
+      useDistrict(hit.district);
+    },
+    err => {
+      btn.disabled = false;
+      const msg = err.code === 1 ? "定位被拒绝，请手动选择区域，或允许本站访问位置。"
+                : err.code === 2 ? "无法获取位置信息，请手动选择区域。"
+                :                  "定位超时，请手动选择区域。";
+      locNote(msg, true);
+    },
+    { enableHighAccuracy: false, timeout: 10000, maximumAge: 10 * 60 * 1000 }
+  );
+}
+
 function buildDistricts() {
   const box = $("#districts");
   box.innerHTML = DISTRICTS.map(d =>
@@ -864,10 +1121,11 @@ function buildDistricts() {
   box.addEventListener("click", ev => {
     const btn = ev.target.closest("button[data-id]");
     if (!btn) return;
-    state.district = DISTRICTS.find(d => d.id === btn.dataset.id);
-    box.querySelectorAll("button").forEach(b =>
-      b.setAttribute("aria-pressed", String(b === btn)));
-    run(false);
+    const d = DISTRICTS.find(x => x.id === btn.dataset.id);
+    if (!d || d.id === state.district.id) return;
+    state.userPicked = true;            // 手动选过之后，自动定位不再覆盖
+    locNote(null);
+    useDistrict(d);
   });
 }
 
@@ -907,9 +1165,16 @@ $("#tableBtn").addEventListener("click", () => {
   btn.textContent = open ? "隐藏数据表格" : "显示数据表格";
 });
 
+$("#locateBtn").addEventListener("click", () => { state.userPicked = true; locate(); });
+
 buildDistricts();
 buildTheme();
 run(false);
+
+// 打开时自动按当前位置选区。定位是异步的，先按默认区域把页面渲染出来，
+// 定位有结果且落在珠海范围内再切区重取，避免白屏等待授权。
+setTimeout(() => { if (!state.userPicked) locate(); }, 400);
+
 setInterval(() => run(true), 10 * 60 * 1000);
 </script>
 </body>
