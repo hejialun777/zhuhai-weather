@@ -214,6 +214,13 @@ tbody th { text-align: left; font-weight: 500; color: var(--text-primary); }
   display: inline-block; margin-top: 10px; padding: 6px 10px;
   background: var(--wash); border-radius: 8px; font-size: 12.5px; color: var(--text-secondary);
 }
+.skel {
+  background: linear-gradient(90deg, var(--wash) 25%, transparent 37%, var(--wash) 63%);
+  background-size: 400% 100%; animation: sk 1.4s ease infinite;
+  border-radius: 6px; color: transparent !important;
+}
+@keyframes sk { 0% { background-position: 100% 0 } 100% { background-position: 0 0 } }
+@media (prefers-reduced-motion: reduce) { .skel { animation: none } }
 
 .foot { margin-top: 22px; font-size: 12px; color: var(--text-muted); text-align: center; line-height: 1.7; text-wrap: pretty; }
 .foot a { color: var(--text-secondary); }
@@ -386,16 +393,22 @@ function dayDate(iso) {
   return `${+m}/${+d}`;
 }
 
-// 把坐标轴范围吸附到刻度步长的整数倍
-function niceScale(lo, hi, wantTicks) {
-  const raw = (hi - lo) / Math.max(1, wantTicks);
-  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
-  const n = raw / mag;
-  const step = (n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10) * mag;
-  const nlo = Math.floor(lo / step) * step;
-  const nhi = Math.ceil(hi / step) * step;
-  return { lo: nlo, hi: nhi, step, count: Math.round((nhi - nlo) / step) };
+// 只在 [lo, hi] 内部取整数刻度（1/2/5/10 倍数），不外扩定义域——否则数据范围一窄
+// 就会被吸附到 20~40 这种大刻度上，图里空掉一半。刻度少于 4 根时自动加密一档。
+// 步长阶梯不含 2.5：非整数步长会让 tickText 的取整标签和网格线位置对不上。
+function niceTicks(lo, hi, want) {
+  for (let w = Math.max(1, want); w <= 12; w++) {
+    const raw = (hi - lo) / w;
+    const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+    const n = raw / mag;
+    const step = (n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10) * mag;
+    const ticks = [];
+    for (let v = Math.ceil(lo / step) * step; v <= hi + 1e-9; v += step) ticks.push(+v.toFixed(6));
+    if (ticks.length >= 4 || w === 12) return { step, ticks };
+  }
 }
+
+const tickText = (v, step) => `${step < 1 ? v.toFixed(1) : Math.round(v)}°`;
 
 /* ==================== 状态 ==================== */
 
@@ -501,6 +514,27 @@ function renderCurrent() {
       <div class="note"${t.noteColor ? ` style="color:${t.noteColor}"` : ""}>${t.note}</div>
       ${t.extra ? `<div class="note">${t.extra}</div>` : ""}
     </div>`).join("");
+
+  fillGrid("#tiles", ".tile");
+}
+
+// 指标格用 1px 间隙做分隔线，最后一行不满时会露出间隙底色（灰块）。
+// 按实际列数补几个空单元格填满末行。
+function fillGrid(boxSel, itemSel) {
+  const box = $(boxSel);
+  if (!box) return;
+  box.querySelectorAll(".filler").forEach(el => el.remove());
+  const cols = getComputedStyle(box).gridTemplateColumns.split(" ").filter(Boolean).length;
+  const n = box.querySelectorAll(itemSel).length;      // 已排除 filler
+  if (cols < 2 || n === 0) return;
+  const rem = (cols - (n % cols)) % cols;
+  const cls = itemSel.replace(/^\./, "") + " filler";
+  for (let i = 0; i < rem; i++) {
+    const el = document.createElement("div");
+    el.className = cls;
+    el.setAttribute("aria-hidden", "true");
+    box.appendChild(el);
+  }
 }
 
 /* ==================== 渲染：24 小时气温曲线 ==================== */
@@ -542,9 +576,16 @@ function drawHourly() {
   const P = HOURLY_PAD;
   const plotW = W - P.l - P.r;
   const plotH = TEMP_H;
-  const H = P.t + plotH + PANEL_GAP + PRECIP_H + P.b;
 
   const d = hourlySlice();
+  // 全程无雨时不画空面板，只留一行说明，省掉近百像素空白
+  const maxPop = Math.max(...d.pop);
+  const hasRain = maxPop >= 5;
+  const gapH = hasRain ? PANEL_GAP : 24;
+  const panelH = hasRain ? PRECIP_H : 0;
+
+  const H = P.t + plotH + gapH + panelH + P.b;
+
   const s1 = cssVar("--series-1"), s2 = cssVar("--series-2"), s3 = cssVar("--series-3");
   const surf = cssVar("--surface-1"), grid = cssVar("--gridline");
   const muted = cssVar("--text-muted"), sec = cssVar("--text-secondary"), base = cssVar("--baseline");
@@ -553,30 +594,29 @@ function drawHourly() {
   const all = [...d.temp, ...d.feels];
   const rawLo = Math.min(...all), rawHi = Math.max(...all);
   const padT = Math.max(1.5, (rawHi - rawLo) * 0.18);
-  const sc = niceScale(rawLo - padT, rawHi + padT, 5);
-  const lo = sc.lo, hi = sc.hi;
+  const lo = rawLo - padT, hi = rawHi + padT;
+  const sc = niceTicks(lo, hi, 5);
 
   const X = i => P.l + (plotW * i) / (d.time.length - 1);
   const Y = v => P.t + plotH * (1 - (v - lo) / (hi - lo));
 
   // ——— 降水面板：0~100%，独立量纲，单独刻度，不与温度共用 Y 轴 ———
-  const PT = P.t + plotH + PANEL_GAP;     // 100% 所在高度
-  const PB = PT + PRECIP_H;               // 基线（0%）
-  const PY = p => PT + PRECIP_H * (1 - Math.max(0, Math.min(100, p)) / 100);
+  const PT = P.t + plotH + gapH;          // 100% 所在高度
+  const PB = PT + panelH;                 // 基线（0%）
+  const PY = p => PT + panelH * (1 - Math.max(0, Math.min(100, p)) / 100);
 
-  const maxPop = Math.max(...d.pop);
   const band = plotW / d.time.length;
   const barW = Math.max(3, Math.min(14, band - 3));
   const peakPopI = d.pop.indexOf(maxPop);
 
   // — 网格与 Y 轴 —
   let gridSvg = "", yLabels = "";
-  for (let v = lo; v <= hi + 1e-9; v += sc.step) {
+  for (const v of sc.ticks) {
     const y = Y(v);
     gridSvg += `<line x1="${P.l}" y1="${y.toFixed(1)}" x2="${W - P.r}" y2="${y.toFixed(1)}"
                   stroke="${grid}" stroke-width="1" shape-rendering="crispEdges"/>`;
     yLabels += `<text x="${P.l - 9}" y="${(y + 3.5).toFixed(1)}" text-anchor="end"
-                  font-size="11" fill="${muted}" style="font-variant-numeric:tabular-nums">${Math.round(v)}°</text>`;
+                  font-size="11" fill="${muted}" style="font-variant-numeric:tabular-nums">${tickText(v, sc.step)}</text>`;
   }
 
   // — X 轴标签，每 3 小时 —
@@ -620,39 +660,47 @@ function drawHourly() {
 
   // — 降水面板 —
   let precipSvg = "";
-  precipSvg += `<line x1="${P.l}" y1="${PB}" x2="${W - P.r}" y2="${PB}"
-                  stroke="${base}" stroke-width="1" shape-rendering="crispEdges"/>`;
-  precipSvg += `<line x1="${P.l}" y1="${(PT + PRECIP_H / 2).toFixed(1)}" x2="${W - P.r}"
-                  y2="${(PT + PRECIP_H / 2).toFixed(1)}"
-                  stroke="${grid}" stroke-width="1" shape-rendering="crispEdges"/>`;
-  precipSvg += `<text x="${P.l - 9}" y="${(PT + 3.5).toFixed(1)}" text-anchor="end"
-                  font-size="11" fill="${muted}" style="font-variant-numeric:tabular-nums">100%</text>`;
-  precipSvg += `<text x="${P.l - 9}" y="${(PB + 3.5).toFixed(1)}" text-anchor="end"
-                  font-size="11" fill="${muted}" style="font-variant-numeric:tabular-nums">0</text>`;
+  if (hasRain) {
+    precipSvg += `<line x1="${P.l}" y1="${PB}" x2="${W - P.r}" y2="${PB}"
+                    stroke="${base}" stroke-width="1" shape-rendering="crispEdges"/>`;
+    precipSvg += `<line x1="${P.l}" y1="${(PT + PRECIP_H / 2).toFixed(1)}" x2="${W - P.r}"
+                    y2="${(PT + PRECIP_H / 2).toFixed(1)}"
+                    stroke="${grid}" stroke-width="1" shape-rendering="crispEdges"/>`;
+    precipSvg += `<text x="${P.l - 9}" y="${(PT + 3.5).toFixed(1)}" text-anchor="end"
+                    font-size="11" fill="${muted}" style="font-variant-numeric:tabular-nums">100%</text>`;
+    precipSvg += `<text x="${P.l - 9}" y="${(PB + 3.5).toFixed(1)}" text-anchor="end"
+                    font-size="11" fill="${muted}" style="font-variant-numeric:tabular-nums">0</text>`;
 
-  d.pop.forEach((p, i) => {
-    const h = (PRECIP_H * Math.max(0, Math.min(100, p))) / 100;
-    if (h < 0.8) return;                                  // 0 概率不画柱，避免读成有值
-    const bx = Math.min(Math.max(X(i) - barW / 2, P.l), P.l + plotW - barW);
-    precipSvg += `<path d="${barPath(bx, PB - h, barW, h, 4)}" fill="${s3}"/>`;
-  });
+    d.pop.forEach((p, i) => {
+      const h = (panelH * Math.max(0, Math.min(100, p))) / 100;
+      if (h < 0.8) return;                                  // 0 概率不画柱，避免读成有值
+      const bx = Math.min(Math.max(X(i) - barW / 2, P.l), P.l + plotW - barW);
+      precipSvg += `<path d="${barPath(bx, PB - h, barW, h, 4)}" fill="${s3}"/>`;
+    });
 
-  // 只直接标注最高的那根柱，不给每根加数字
-  if (maxPop >= 20) {
-    precipSvg += `<text x="${X(peakPopI).toFixed(1)}" y="${(PY(maxPop) - 7).toFixed(1)}"
-                    text-anchor="middle" font-size="11.5" font-weight="600" fill="${sec}"
-                    style="font-variant-numeric:tabular-nums">${maxPop}%</text>`;
+    // 只直接标注最高的那根柱，不给每根加数字
+    if (maxPop >= 20) {
+      precipSvg += `<text x="${X(peakPopI).toFixed(1)}" y="${(PY(maxPop) - 7).toFixed(1)}"
+                      text-anchor="middle" font-size="11.5" font-weight="600" fill="${sec}"
+                      style="font-variant-numeric:tabular-nums">${maxPop}%</text>`;
+    }
+    precipSvg += `<text x="${P.l}" y="${(PT - 11).toFixed(1)}" font-size="11.5"
+                    fill="${muted}">降水概率</text>`;
+  } else {
+    precipSvg += `<line x1="${P.l}" y1="${PB}" x2="${W - P.r}" y2="${PB}"
+                    stroke="${base}" stroke-width="1" shape-rendering="crispEdges"/>`;
+    precipSvg += `<text x="${P.l}" y="${(PB - 10).toFixed(1)}" font-size="12"
+                    fill="${muted}">未来 24 小时无明显降水（最高 ${maxPop}%）</text>`;
   }
-  precipSvg += `<text x="${P.l}" y="${(PT - 11).toFixed(1)}" font-size="11.5"
-                  fill="${muted}">降水概率</text>`;
 
   // — 悬停层 —
   const hoverSvg = `<g id="hGroup" style="opacity:0">
-      <rect id="hBand" y="${PT}" width="${band.toFixed(1)}" height="${PRECIP_H}" fill="${s3}" fill-opacity="0.16"/>
+      ${hasRain ? `<rect id="hBand" y="${PT}" width="${band.toFixed(1)}" height="${panelH}"
+                    fill="${s3}" fill-opacity="0.16"/>
+      <rect id="hBar" width="${barW}" height="3" fill="${s3}" stroke="${surf}" stroke-width="2"/>` : ""}
       <line id="hLine" y1="${P.t}" y2="${PB}" stroke="${base}" stroke-width="1"/>
       <circle id="hDot1" r="4.5" fill="${s1}" stroke="${surf}" stroke-width="2"/>
       <circle id="hDot2" r="4.5" fill="${s2}" stroke="${surf}" stroke-width="2"/>
-      <rect id="hBar" width="${barW}" height="3" fill="${s3}" stroke="${surf}" stroke-width="2"/>
     </g>
     <rect id="hRect" x="${P.l}" y="${P.t}" width="${plotW}" height="${PB - P.t}" fill="transparent" style="cursor:crosshair"/>`;
 
@@ -698,11 +746,13 @@ function drawHourly() {
 
     // 降水面板：色带随指针移动，顶端横条标出该小时的概率高度
     const pop = d.pop[i] ?? 0;
-    g.querySelector("#hBand").setAttribute("x",
-      Math.min(Math.max(x - band / 2, P.l), P.l + plotW - band));
-    g.querySelector("#hBar").setAttribute("x",
-      Math.min(Math.max(x - barW / 2, P.l), P.l + plotW - barW));
-    g.querySelector("#hBar").setAttribute("y", PY(pop));
+    if (hasRain) {
+      g.querySelector("#hBand").setAttribute("x",
+        Math.min(Math.max(x - band / 2, P.l), P.l + plotW - band));
+      g.querySelector("#hBar").setAttribute("x",
+        Math.min(Math.max(x - barW / 2, P.l), P.l + plotW - barW));
+      g.querySelector("#hBar").setAttribute("y", PY(pop));
+    }
 
     const hour = d.time[i].slice(11, 16);
     const dayTag = d.time[i].slice(0, 10) === state.forecast.daily.time[0] ? "今天" : "明天";
@@ -742,33 +792,37 @@ function drawDaily() {
   const host = $("#dailyChart");
   const W = host.clientWidth;
   if (!W) return;
-  const H = 290;
-  const P = { t: 58, r: 12, b: 46, l: 40 };
-  const plotW = W - P.l - P.r;
-  const plotH = H - P.t - P.b;
-
   const d = state.forecast.daily;
   const s1 = cssVar("--series-1"), surf = cssVar("--surface-1");
   const grid = cssVar("--gridline"), muted = cssVar("--text-muted"), sec = cssVar("--text-secondary");
 
-  let lo = Math.min(...d.temperature_2m_min), hi = Math.max(...d.temperature_2m_max);
-  lo = Math.floor((lo - 1.5) / 2) * 2; hi = Math.ceil((hi + 1.5) / 2) * 2;
+  // 窄屏（手机）时列宽不足以放天气文字，只保留图标/温度/降水概率，
+  // 天气描述仍可在悬停提示与数据表格中查看。
+  const P = { t: 58, r: 12, b: 46, l: 40 };
+  const band = (W - P.l - P.r) / d.time.length;
+  const narrow = band < 56;
+  if (narrow) P.b = 30;
 
-  const band = plotW / d.time.length;
+  const H = narrow ? 272 : 290;
+  const plotW = W - P.l - P.r;
+  const plotH = H - P.t - P.b;
+
+  const lo = Math.min(...d.temperature_2m_min) - 1.5;
+  const hi = Math.max(...d.temperature_2m_max) + 1.5;
+  const sc = niceTicks(lo, hi, 4);
+
   const cx = i => P.l + band * (i + 0.5);
   const Y = v => P.t + plotH * (1 - (v - lo) / (hi - lo));
-  const BAR = 11;
+  const BAR = Math.min(11, band * 0.32);
 
   // — 温度轴（共用刻度）—
-  const ticks = 5;
   let gridSvg = "", yLabels = "";
-  for (let k = 0; k <= ticks; k++) {
-    const v = lo + ((hi - lo) * k) / ticks;
+  for (const v of sc.ticks) {
     const y = Y(v);
     gridSvg += `<line x1="${P.l}" y1="${y.toFixed(1)}" x2="${W - P.r}" y2="${y.toFixed(1)}"
                   stroke="${grid}" stroke-width="1" shape-rendering="crispEdges"/>`;
     yLabels += `<text x="${P.l - 9}" y="${(y + 3.5).toFixed(1)}" text-anchor="end"
-                  font-size="11" fill="${muted}" style="font-variant-numeric:tabular-nums">${Math.round(v)}°</text>`;
+                  font-size="11" fill="${muted}" style="font-variant-numeric:tabular-nums">${tickText(v, sc.step)}</text>`;
   }
 
   // — 今日实时温度点 —
@@ -798,10 +852,11 @@ function drawDaily() {
             fill="${muted}" style="font-variant-numeric:tabular-nums">${Math.round(tmin)}°</text>
       ${i === 0 ? `<circle cx="${x.toFixed(1)}" cy="${Y(cur).toFixed(1)}" r="4.5"
                      fill="${s1}" stroke="${surf}" stroke-width="2"/>` : ""}
-      <text x="${x.toFixed(1)}" y="${H - P.b + 20}" text-anchor="middle" font-size="11.5"
-            fill="${pop >= 50 ? sec : muted}">${pop > 0 ? `💧${pop}%` : "—"}</text>
-      <text x="${x.toFixed(1)}" y="${H - P.b + 37}" text-anchor="middle" font-size="11"
-            fill="${muted}">${cond}</text>
+      ${pop > 0 ? `<text x="${x.toFixed(1)}" y="${H - P.b + 20}" text-anchor="middle"
+            font-size="${narrow ? 10.5 : 11.5}"
+            fill="${pop >= 50 ? sec : muted}">💧${pop}%</text>` : ""}
+      ${narrow ? "" : `<text x="${x.toFixed(1)}" y="${H - P.b + 37}" text-anchor="middle"
+            font-size="11" fill="${muted}">${cond}</text>`}
     </g>`;
   });
 
@@ -988,6 +1043,8 @@ function renderLife() {
       </div>
       <div class="life-advice">${advice}</div>
     </div>`).join("");
+
+  fillGrid("#lifeGrid");
 }
 
 function renderAll() {
@@ -1153,6 +1210,7 @@ let resizeTimer;
 window.addEventListener("resize", () => {
   clearTimeout(resizeTimer);
   resizeTimer = setTimeout(() => { if (state.forecast) renderAll(); }, 160);
+  // 列数变了，指标格的补位单元格数量也要跟着变（renderAll 里已含 fillTiles）
 });
 
 $("#refreshBtn").addEventListener("click", () => run(true));
